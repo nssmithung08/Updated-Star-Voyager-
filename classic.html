@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Star Voyager: Mission to Titan</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #04050d; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+// ======================================================================
+//  STAR VOYAGER: MISSION TO TITAN
+//  A story-driven space adventure with realistic (Newtonian) flight.
+//  Travel Earth -> Moon -> Mars -> Asteroid Belt -> Jupiter -> Saturn.
+// ======================================================================
+const TAU = Math.PI * 2;
+const rand = (a, b) => a + Math.random() * (b - a);
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0;
+function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+addEventListener('resize', resize); resize();
+const isTouch = 'ontouchstart' in window;
+
+// ---------------------------------------------------------------- DATA
+const SECTORS = [
+  { name: 'Earth Orbit', to: 'The Moon', ang: -0.9, dist: 4200, rocks: 22, pirates: 0, crates: 6, repair: 2,
+    from: { r: 520, c1: '#7cc4ff', c2: '#0f3d86', atm: 'rgba(140,200,255,0.55)' },
+    dest: { name: 'Tranquility Base', r: 150, c1: '#dcdcdc', c2: '#6a6a6a', k: 0.03 },
+    intro: 'Year 2142. Titan Colony, 1.4 billion km away, has gone silent. You are the Commander of the Voyager-7, the only ship able to reach Saturn in time. Mission Control has planned five supply stops. First stop: the Moon.',
+    talk: [['MISSION CONTROL', 'Push the stick toward where you want to go. Push further to burn more fuel.'],
+           ['NOVA (ship AI)', 'There is no air in space, Commander. You keep drifting until you thrust the other way. Use BRAKE to slow down.'],
+           ['NOVA (ship AI)', 'Fly into the glowing dock ring slowly to land. Collect green fuel cells and blue repair kits.']],
+    factTitle: 'The Moon',
+    fact: 'The Moon is about 384,400 km from Earth. Its gravity is only one-sixth of Earth\'s, which is why astronauts bounced when they walked. With no air or wind, footprints there last for a very long time.' },
+
+  { name: 'Mars Approach', to: 'Mars', ang: 0.25, dist: 5200, rocks: 28, pirates: 1, crates: 6, repair: 3,
+    from: { r: 150, c1: '#dcdcdc', c2: '#6a6a6a' },
+    dest: { name: 'Red Dust Outpost', r: 200, c1: '#e5784a', c2: '#7a2e14', atm: 'rgba(255,170,120,0.35)', k: 0.04 },
+    intro: 'Fuel tanks are full. Ahead lies Mars. Scanners show an unknown ship lurking in the area. Stay alert.',
+    talk: [['NOVA (ship AI)', 'Unknown ship detected. Your laser heats up as you fire. Overheat and it locks for a moment.'],
+           ['MISSION CONTROL', 'Your shots carry your ship\'s speed. Fire while moving and they travel faster.']],
+    factTitle: 'Mars',
+    fact: 'Mars has the tallest volcano in the solar system: Olympus Mons, about 22 km high, nearly three times the height of Mount Everest. Its thin air is mostly carbon dioxide, and a Martian day lasts about 24 hours 37 minutes.' },
+
+  { name: 'The Asteroid Belt', to: 'Ceres', ang: -0.45, dist: 6000, rocks: 70, pirates: 2, crates: 8, repair: 4,
+    from: { r: 200, c1: '#e5784a', c2: '#7a2e14' },
+    dest: { name: 'Ceres Station', r: 170, c1: '#b9b2a8', c2: '#58524a', k: 0.03 },
+    intro: 'The Belt is thick with rock. Mind your speed: a collision at high speed hurts far more than a gentle bump. Pirates are known to hide here.',
+    talk: [['NOVA (ship AI)', 'Large asteroids split into smaller ones when shot. Faster impacts cause more hull damage.'],
+           ['MISSION CONTROL', 'Ceres Station is our next refuel stop.']],
+    factTitle: 'Ceres and the Asteroid Belt',
+    fact: 'Ceres is a dwarf planet about 940 km across, the biggest object in the asteroid belt. In real life the belt is mostly empty space and spacecraft pass through easily. Movies, and this game, make it much more crowded!' },
+
+  { name: 'Jupiter\'s Gravity', to: 'Europa', ang: 0.7, dist: 6500, rocks: 26, pirates: 2, crates: 8, repair: 4,
+    from: { r: 170, c1: '#b9b2a8', c2: '#58524a' },
+    dest: { name: 'Europa Ice Base', r: 150, c1: '#e8f2ff', c2: '#7a8ea8', k: 0.03 },
+    back: { off: 1500, r: 900, c1: '#e8c9a0', c2: '#8a5a34', bands: true, k: 0.07 },
+    intro: 'Jupiter\'s enormous gravity will bend your path. Watch your velocity near the giant planet, and use thrust to escape its pull.',
+    talk: [['NOVA (ship AI)', 'Jupiter is pulling us sideways. Gravity gets stronger the closer you get.'],
+           ['MISSION CONTROL', 'Europa Ice Base is just beyond. Do not fall into Jupiter!']],
+    factTitle: 'Jupiter and Europa',
+    fact: 'Jupiter is more than twice as massive as all the other planets combined. Its moon Europa hides a salty ocean under an icy crust, and scientists think it holds roughly twice as much water as all of Earth\'s oceans.' },
+
+  { name: 'Saturn: Final Stand', to: 'Titan', ang: -0.15, dist: 7000, rocks: 30, pirates: 2, crates: 9, repair: 5, boss: true,
+    from: { r: 150, c1: '#e8f2ff', c2: '#7a8ea8' },
+    dest: { name: 'Titan Colony', r: 200, c1: '#e0a63c', c2: '#7a4a10', atm: 'rgba(255,190,90,0.5)', k: 0.04 },
+    back: { off: -1500, r: 800, c1: '#f0dcae', c2: '#9a7a44', ring: true, bands: true, k: 0 },
+    intro: 'Titan is in sight. Long-range scans show a rogue AI warship has taken over the colony\'s defences. Destroy it, then dock at Titan. The colony is counting on you.',
+    talk: [['MISSION CONTROL', 'The warship is guarding Titan. Its shield will drop only when it is destroyed.'],
+           ['NOVA (ship AI)', 'Keep moving, Commander. A stationary target is an easy target.']],
+    factTitle: 'Titan and Saturn',
+    fact: 'Titan is Saturn\'s biggest moon, with a thick nitrogen atmosphere and lakes of liquid methane. Saturn\'s rings are mostly chunks of water ice, and Saturn is so light for its size that it would float in water, if you had a big enough bathtub.' }
+];
+
+// ---------------------------------------------------------------- STATE
+let state = 'menu';  // menu | brief | playing | fact | gameover | win
+let sec = 0, S = SECTORS[0], score = 0;
+let ship, bodies = [], rocks = [], crates = [], foes = [], bullets = [], ebullets = [], parts = [];
+let dir = { x: 1, y: 0 }, px = 0, py = 1;
+let dialog = [], dlgT = 0, shake = 0, flash = 0, dockT = 0, strandT = 0, frame = 0;
+let reserveUsed = false, bossAlive = false, warned = false, gameoverMsg = '';
+const cam = { x: 0, y: 0 };
+let saved = 0;
+try { saved = +localStorage.getItem('sv2_sector') || 0; } catch (e) {}
+
+const stars = [];
+for (let i = 0; i < 170; i++) stars.push({ x: Math.random() * 2000, y: Math.random() * 2000, z: rand(0.04, 0.4), s: rand(0.6, 2) });
+
+// ---------------------------------------------------------------- INPUT
+const keys = {};
+const joy = { id: null, ox: 0, oy: 0, x: 0, y: 0 };
+let fireId = null, brakeId = null;
+const btns = () => ({ fire: { x: W - 75, y: H - 85, r: 48 }, brake: { x: W - 75, y: H - 190, r: 36 } });
+const inCircle = (x, y, c, pad = 14) => Math.hypot(x - c.x, y - c.y) < c.r + pad;
+
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  keys[k] = true;
+  if ((k === 'enter' || k === ' ') && state !== 'playing' && state !== 'menu') advance();
+  if (k === 'enter' && state === 'menu') newGame();
+  if (k === 'c' && state === 'menu' && saved > 0) continueGame();
+  if (k === ' ' || k.startsWith('arrow')) e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+function tap(x, y) {
+  if (state === 'menu') {
+    const b = menuBtns();
+    if (x > b.nw.x && x < b.nw.x + b.nw.w && y > b.nw.y && y < b.nw.y + b.nw.h) newGame();
+    else if (saved > 0 && x > b.ct.x && x < b.ct.x + b.ct.w && y > b.ct.y && y < b.ct.y + b.ct.h) continueGame();
+  } else if (state !== 'playing') advance();
+}
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const x = t.clientX, y = t.clientY;
+    if (state !== 'playing') { tap(x, y); continue; }
+    const b = btns();
+    if (inCircle(x, y, b.fire)) fireId = t.identifier;
+    else if (inCircle(x, y, b.brake)) brakeId = t.identifier;
+    else if (joy.id === null && x < W * 0.65) { joy.id = t.identifier; joy.ox = joy.x = x; joy.oy = joy.y = y; }
+  }
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) if (t.identifier === joy.id) { joy.x = t.clientX; joy.y = t.clientY; }
+}, { passive: false });
+const tend = e => {
+  for (const t of e.changedTouches) {
+    if (t.identifier === joy.id) joy.id = null;
+    if (t.identifier === fireId) fireId = null;
+    if (t.identifier === brakeId) brakeId = null;
+  }
+};
+canvas.addEventListener('touchend', tend); canvas.addEventListener('touchcancel', tend);
+canvas.addEventListener('mousedown', e => tap(e.clientX, e.clientY));
+
+// ---------------------------------------------------------------- FLOW
+function newGame() { score = 0; loadSector(0); state = 'brief'; }
+function continueGame() { score = 0; loadSector(Math.min(saved, SECTORS.length - 1)); state = 'brief'; }
+function advance() {
+  if (state === 'brief') {
+    state = 'playing'; dialog = []; dlgT = 0;
+    S.talk.forEach(t => say(t[0], t[1]));
+  } else if (state === 'fact') {
+    if (sec + 1 >= SECTORS.length) { state = 'win'; try { localStorage.setItem('sv2_sector', 0); saved = 0; } catch (e) {} }
+    else { loadSector(sec + 1); state = 'brief'; }
+  } else if (state === 'gameover') { loadSector(sec); state = 'playing'; S.talk.forEach(t => say(t[0], t[1])); }
+  else if (state === 'win') state = 'menu';
+}
+function say(who, text) { dialog.push({ who, text }); }
+
+function place(t0, t1, spread) {
+  for (let i = 0; i < 40; i++) {
+    const t = rand(t0, t1), s = rand(-spread, spread);
+    const x = dir.x * S.dist * t + px * s, y = dir.y * S.dist * t + py * s;
+    if (Math.hypot(x, y) > 320 && bodies.every(b => Math.hypot(x - b.x, y - b.y) > b.r + 140)) return { x, y };
+  }
+  return { x: dir.x * S.dist * 0.5, y: dir.y * S.dist * 0.5 };
+}
+function mkRock(x, y, r, vx, vy) {
+  const shape = []; for (let i = 0; i < 9; i++) shape.push(rand(0.72, 1.05));
+  return { x, y, r, vx, vy, rot: rand(0, TAU), vr: rand(-0.02, 0.02), shape };
+}
+
+function loadSector(i) {
+  sec = i; S = SECTORS[i];
+  dir = { x: Math.cos(S.ang), y: Math.sin(S.ang) }; px = -dir.y; py = dir.x;
+  ship = { x: 0, y: 0, vx: 0, vy: 0, a: S.ang, hull: 100, fuel: 100, heat: 0, over: false, cool: 0, inv: 0 };
+  bodies = [
+    Object.assign({ x: -dir.x * (S.from.r + 220), y: -dir.y * (S.from.r + 220) }, S.from),
+    Object.assign({ x: dir.x * S.dist, y: dir.y * S.dist, dest: true, range: S.dest.r * 7 }, S.dest)
+  ];
+  if (S.back) bodies.push(Object.assign({ x: dir.x * S.dist + px * S.back.off, y: dir.y * S.dist + py * S.back.off, range: S.back.r * 3 }, S.back));
+  rocks = []; crates = []; foes = []; bullets = []; ebullets = []; parts = [];
+  for (let n = 0; n < S.rocks; n++) { const p = place(0.12, 0.92, 700); rocks.push(mkRock(p.x, p.y, rand(18, 46), rand(-0.6, 0.6), rand(-0.6, 0.6))); }
+  for (let n = 0; n < S.crates; n++) { const p = place(0.1, 0.95, 500); crates.push({ x: p.x, y: p.y, type: 'fuel' }); }
+  for (let n = 0; n < S.repair; n++) { const p = place(0.1, 0.95, 500); crates.push({ x: p.x, y: p.y, type: 'repair' }); }
+  for (let n = 0; n < S.pirates; n++) { const p = place(0.35, 0.9, 500); foes.push({ type: 'p', x: p.x, y: p.y, vx: 0, vy: 0, a: 0, hp: 3, max: 3, r: 20, cd: rand(60, 120), orb: Math.random() < 0.5 ? 1 : -1 }); }
+  bossAlive = !!S.boss;
+  if (S.boss) { const p = place(0.55, 0.62, 80); foes.push({ type: 'b', x: p.x, y: p.y, vx: 0, vy: 0, a: 0, hp: 60, max: 60, r: 62, cd: 70, orb: 1 }); }
+  dialog = []; dlgT = 0; shake = 0; flash = 0; dockT = 0; strandT = 0; reserveUsed = false; warned = false;
+  cam.x = ship.x; cam.y = ship.y;
+  joy.id = null; fireId = null; brakeId = null;
+}
+
+// ---------------------------------------------------------------- HELPERS
+const angDiff = (a, b) => { let d = a - b; while (d > Math.PI) d -= TAU; while (d < -Math.PI) d += TAU; return d; };
+function boom(x, y, color, n = 14, sp = 4) {
+  for (let i = 0; i < n; i++) { const a = rand(0, TAU), s = rand(0.5, sp); parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: rand(20, 50), max: 50, color }); }
+}
+function hurt(n) {
+  if (state !== 'playing' || ship.inv > 0) return;
+  ship.inv = 20; ship.hull -= n; shake = Math.min(18, 6 + n); flash = 12;
+  if (ship.hull <= 0) { ship.hull = 0; boom(ship.x, ship.y, '#ffb703', 50, 6); gameoverMsg = 'Hull destroyed'; state = 'gameover'; }
+}
+function breakRock(r) {
+  r.dead = true; score += 25;
+  boom(r.x, r.y, '#a89a88', 10, 3);
+  if (r.r > 24) for (let i = 0; i < 2; i++) rocks.push(mkRock(r.x, r.y, r.r * 0.6, r.vx + rand(-1.2, 1.2), r.vy + rand(-1.2, 1.2)));
+  else if (Math.random() < 0.18) crates.push({ x: r.x, y: r.y, type: Math.random() < 0.6 ? 'fuel' : 'repair' });
+}
+function complete() {
+  score += Math.round(ship.hull * 5 + ship.fuel * 5);
+  state = 'fact';
+  const nxt = Math.min(sec + 1, SECTORS.length - 1);
+  try { localStorage.setItem('sv2_sector', nxt); saved = nxt; } catch (e) {}
+}
+
+// ---------------------------------------------------------------- UPDATE
+function update() {
+  frame++;
+  if (flash > 0) flash--;
+  if (shake > 0) shake--;
+  if (state !== 'playing') return;
+  const s = ship;
+  if (s.inv > 0) s.inv--;
+
+  // --- input
+  let turn = 0, thr = 0;
+  const firing = !!keys[' '] || fireId !== null;
+  const braking = !!(keys['s'] || keys['arrowdown']) || brakeId !== null;
+  if (keys['a'] || keys['arrowleft']) turn -= 1;
+  if (keys['d'] || keys['arrowright']) turn += 1;
+  if (keys['w'] || keys['arrowup']) thr = 1;
+  if (joy.id !== null) {
+    const dx = joy.x - joy.ox, dy = joy.y - joy.oy, m = Math.hypot(dx, dy);
+    if (m > 14) {
+      const diff = angDiff(Math.atan2(dy, dx), s.a), step = 0.075;
+      s.a += Math.max(-step, Math.min(step, diff));
+      if (Math.abs(diff) < 0.7) thr = Math.min(1, (m - 14) / 45);
+    }
+  }
+  s.a += turn * 0.065;
+
+  // --- engines, fuel
+  if (s.fuel <= 0 && !reserveUsed) { s.fuel = 12; reserveUsed = true; say('NOVA (ship AI)', 'Main tank empty. Emergency reserve engaged. Find a green fuel cell!'); }
+  const cs = Math.cos(s.a), sn = Math.sin(s.a);
+  if (thr > 0 && s.fuel > 0) {
+    s.vx += cs * 0.13 * thr; s.vy += sn * 0.13 * thr;
+    s.fuel = Math.max(0, s.fuel - 0.045 * thr);
+    parts.push({ x: s.x - cs * 18, y: s.y - sn * 18, vx: s.vx - cs * rand(2, 4) + rand(-0.4, 0.4), vy: s.vy - sn * rand(2, 4) + rand(-0.4, 0.4), life: 14, max: 14, color: '#ffa940' });
+  }
+  if (braking && s.fuel > 0) { s.vx *= 0.95; s.vy *= 0.95; s.fuel = Math.max(0, s.fuel - 0.015); }
+  s.vx *= 0.9995; s.vy *= 0.9995;
+  let spd = Math.hypot(s.vx, s.vy);
+  if (spd > 9) { s.vx *= 9 / spd; s.vy *= 9 / spd; spd = 9; }
+  if (s.fuel <= 0 && reserveUsed && spd < 0.4) {
+    if (++strandT > 360) { s.hull = 0; gameoverMsg = 'Stranded without fuel'; state = 'gameover'; return; }
+  } else strandT = 0;
+
+  // --- laser
+  if (s.cool > 0) s.cool--;
+  if (firing && s.cool <= 0 && !s.over) {
+    bullets.push({ x: s.x + cs * 24, y: s.y + sn * 24, vx: s.vx + cs * 13, vy: s.vy + sn * 13, life: 70 });
+    s.cool = 7; s.heat += 7;
+    if (s.heat >= 100) { s.heat = 100; s.over = true; }
+  }
+  s.heat = Math.max(0, s.heat - 0.6);
+  if (s.over && s.heat < 35) s.over = false;
+
+  s.x += s.vx; s.y += s.vy;
+
+  // --- gravity and bodies
+  for (const b of bodies) {
+    const dx = b.x - s.x, dy = b.y - s.y, d = Math.hypot(dx, dy) || 1;
+    if (b.k && d < b.range) {
+      const a = b.k * Math.pow(b.r / Math.max(d, b.r), 2);
+      s.vx += dx / d * a; s.vy += dy / d * a;
+    }
+    if (d < b.r + 14) {
+      const nx = -dx / d, ny = -dy / d;
+      s.x = b.x + nx * (b.r + 14); s.y = b.y + ny * (b.r + 14);
+      const vn = s.vx * nx + s.vy * ny;
+      if (vn < 0) { s.vx -= 1.5 * vn * nx; s.vy -= 1.5 * vn * ny; const dmg = Math.abs(vn) * 4 - 2; if (dmg > 0) hurt(dmg); }
+    }
+  }
+
+  // --- docking
+  const D = bodies[1], dd = Math.hypot(s.x - D.x, s.y - D.y);
+  if (dd < D.r + 170) {
+    if (bossAlive) { if (!warned) { warned = true; say('MISSION CONTROL', 'Titan\'s shield is up! Destroy the warship first!'); } }
+    else if (spd < 2.4) { if (++dockT > 100) { complete(); return; } }
+    else dockT = Math.max(0, dockT - 2);
+  } else dockT = 0;
+
+  // --- crates
+  for (const c of crates) if (Math.hypot(c.x - s.x, c.y - s.y) < 34) {
+    c.dead = true;
+    if (c.type === 'fuel') { s.fuel = Math.min(100, s.fuel + 35); boom(c.x, c.y, '#5dffa0', 10, 3); }
+    else { s.hull = Math.min(100, s.hull + 30); boom(c.x, c.y, '#5db4ff', 10, 3); }
+    score += 10;
+  }
+  crates = crates.filter(c => !c.dead);
+
+  // --- rocks
+  for (const r of rocks) {
+    r.x += r.vx; r.y += r.vy; r.rot += r.vr;
+    const d = Math.hypot(r.x - s.x, r.y - s.y);
+    if (d < r.r + 14 && !r.dead) {
+      const rel = Math.hypot(r.vx - s.vx, r.vy - s.vy);
+      hurt(Math.min(25, Math.max(2, rel * r.r / 9)));
+      const nx = (s.x - r.x) / (d || 1), ny = (s.y - r.y) / (d || 1);
+      s.vx += nx * 2; s.vy += ny * 2;
+      breakRock(r);
+    }
+  }
+
+  // --- enemies
+  for (const f of foes) {
+    const dx = s.x - f.x, dy = s.y - f.y, d = Math.hypot(dx, dy) || 1;
+    f.a = Math.atan2(dy, dx);
+    if (d < 1100) {
+      const want = d > 340 ? 1 : d < 210 ? -1 : 0;
+      const acc = f.type === 'b' ? 0.05 : 0.07;
+      f.vx += (dx / d) * acc * want + (-dy / d) * 0.035 * f.orb;
+      f.vy += (dy / d) * acc * want + (dx / d) * 0.035 * f.orb;
+      const cap = f.type === 'b' ? 2.6 : 3.6, fs = Math.hypot(f.vx, f.vy);
+      if (fs > cap) { f.vx *= cap / fs; f.vy *= cap / fs; }
+      if (--f.cd <= 0 && d < 700) {
+        const n = f.type === 'b' ? 5 : 1;
+        for (let k = 0; k < n; k++) {
+          const a = f.a + (k - (n - 1) / 2) * 0.16 + rand(-0.04, 0.04);
+          ebullets.push({ x: f.x + Math.cos(a) * f.r, y: f.y + Math.sin(a) * f.r, vx: Math.cos(a) * 6.5, vy: Math.sin(a) * 6.5, life: 130 });
+        }
+        f.cd = f.type === 'b' ? 75 : rand(80, 130);
+      }
+    }
+    f.vx *= 0.995; f.vy *= 0.995;
+    f.x += f.vx; f.y += f.vy;
+    if (d < f.r + 16) { hurt(10); s.vx += (-dx / d) * 3; s.vy += (-dy / d) * 3; f.vx += (dx / d) * 2; f.vy += (dy / d) * 2; }
+  }
+
+  // --- bullets
+  for (const b of bullets) {
+    b.x += b.vx; b.y += b.vy; b.life--;
+    for (const r of rocks) if (!r.dead && !b.dead && Math.hypot(b.x - r.x, b.y - r.y) < r.r) { b.dead = true; breakRock(r); }
+    for (const f of foes) if (!f.dead && !b.dead && Math.hypot(b.x - f.x, b.y - f.y) < f.r + 4) {
+      b.dead = true; f.hp--; boom(b.x, b.y, '#ffd166', 4, 3);
+      if (f.hp <= 0) {
+        f.dead = true; boom(f.x, f.y, f.type === 'b' ? '#ffd166' : '#ff6b6b', f.type === 'b' ? 80 : 30, 6);
+        if (f.type === 'b') { score += 1500; bossAlive = false; shake = 20; say('MISSION CONTROL', 'The warship is down! Titan\'s shield is dropping. Dock now!'); }
+        else { score += 200; crates.push({ x: f.x, y: f.y, type: Math.random() < 0.5 ? 'fuel' : 'repair' }); }
+      }
+    }
+  }
+  bullets = bullets.filter(b => !b.dead && b.life > 0);
+  rocks = rocks.filter(r => !r.dead);
+  foes = foes.filter(f => !f.dead);
+
+  for (const b of ebullets) {
+    b.x += b.vx; b.y += b.vy; b.life--;
+    if (Math.hypot(b.x - s.x, b.y - s.y) < 16) { b.dead = true; hurt(7); }
+  }
+  ebullets = ebullets.filter(b => !b.dead && b.life > 0);
+
+  for (const p of parts) { p.x += p.vx; p.y += p.vy; p.life--; }
+  parts = parts.filter(p => p.life > 0);
+
+  // dialogue
+  if (dialog.length) { if (++dlgT > 260) { dialog.shift(); dlgT = 0; } } else dlgT = 0;
+
+  cam.x += (s.x + s.vx * 12 - cam.x) * 0.1;
+  cam.y += (s.y + s.vy * 12 - cam.y) * 0.1;
+}
+
+// ---------------------------------------------------------------- DRAW
+function wrap(t, x, y, mw, lh) {
+  const words = t.split(' '); let line = '';
+  for (const w of words) {
+    const test = line + w + ' ';
+    if (ctx.measureText(test).width > mw && line) { ctx.fillText(line, x, y); line = w + ' '; y += lh; } else line = test;
+  }
+  ctx.fillText(line, x, y); return y + lh;
+}
+
+function drawBody(b) {
+  ctx.save(); ctx.translate(b.x, b.y);
+  if (b.ring) { ctx.save(); ctx.rotate(-0.35); ctx.strokeStyle = 'rgba(220,200,160,0.55)'; ctx.lineWidth = b.r * 0.28; ctx.beginPath(); ctx.ellipse(0, 0, b.r * 1.9, b.r * 0.5, 0, 0, TAU); ctx.stroke(); ctx.restore(); }
+  const g = ctx.createRadialGradient(-b.r * 0.35, -b.r * 0.35, b.r * 0.1, 0, 0, b.r);
+  g.addColorStop(0, b.c1); g.addColorStop(1, b.c2);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, b.r, 0, TAU); ctx.fill();
+  if (b.bands) {
+    ctx.save(); ctx.beginPath(); ctx.arc(0, 0, b.r, 0, TAU); ctx.clip();
+    ctx.fillStyle = 'rgba(90,50,20,0.22)';
+    for (let i = -4; i <= 4; i += 2) ctx.fillRect(-b.r, i * b.r * 0.2 - b.r * 0.06, b.r * 2, b.r * 0.12);
+    ctx.restore();
+  }
+  if (b.atm) { ctx.strokeStyle = b.atm; ctx.lineWidth = Math.max(4, b.r * 0.03); ctx.beginPath(); ctx.arc(0, 0, b.r, 0, TAU); ctx.stroke(); }
+  if (b.ring) { ctx.save(); ctx.rotate(-0.35); ctx.strokeStyle = 'rgba(220,200,160,0.55)'; ctx.lineWidth = b.r * 0.28; ctx.beginPath(); ctx.ellipse(0, 0, b.r * 1.9, b.r * 0.5, 0, 0, Math.PI); ctx.stroke(); ctx.restore(); }
+  ctx.restore();
+}
+
+function drawShip(s) {
+  if (s.inv > 0 && Math.floor(s.inv / 3) % 2) return;
+  ctx.save(); ctx.translate(s.x, s.y); ctx.rotate(s.a);
+  ctx.fillStyle = '#4dd0ff'; ctx.beginPath(); ctx.moveTo(24, 0); ctx.lineTo(-14, 15); ctx.lineTo(-7, 0); ctx.lineTo(-14, -15); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#1b6fa8'; ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(-14, 15); ctx.lineTo(-2, 5); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#e8fbff'; ctx.beginPath(); ctx.ellipse(6, 0, 7, 4, 0, 0, TAU); ctx.fill();
+  ctx.restore();
+}
+
+function drawFoe(f) {
+  ctx.save(); ctx.translate(f.x, f.y); ctx.rotate(f.a);
+  if (f.type === 'p') {
+    ctx.fillStyle = '#ff6b6b'; ctx.beginPath(); ctx.moveTo(22, 0); ctx.lineTo(-16, 18); ctx.lineTo(-8, 0); ctx.lineTo(-16, -18); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#2a0a0a'; ctx.beginPath(); ctx.arc(4, 0, 5, 0, TAU); ctx.fill();
+  } else {
+    ctx.fillStyle = '#5a189a'; ctx.beginPath();
+    for (let i = 0; i < 6; i++) ctx.lineTo(Math.cos(i * TAU / 6) * f.r, Math.sin(i * TAU / 6) * f.r);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#c77dff'; ctx.lineWidth = 4; ctx.stroke();
+    ctx.fillStyle = '#ff3860'; ctx.beginPath(); ctx.arc(f.r * 0.35, 0, 14, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(f.r * 0.4, 0, 5, 0, TAU); ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawWorld() {
+  for (const b of bodies) drawBody(b);
+  // dock ring
+  const D = bodies[1];
+  ctx.save(); ctx.translate(D.x, D.y);
+  ctx.strokeStyle = bossAlive ? 'rgba(255,80,100,0.6)' : 'rgba(255,214,102,0.8)'; ctx.lineWidth = 3; ctx.setLineDash([14, 12]);
+  ctx.lineDashOffset = -frame * 0.4; ctx.beginPath(); ctx.arc(0, 0, D.r + 170, 0, TAU); ctx.stroke(); ctx.setLineDash([]);
+  if (dockT > 0) { ctx.strokeStyle = '#7dffb3'; ctx.lineWidth = 8; ctx.beginPath(); ctx.arc(0, 0, D.r + 170, -Math.PI / 2, -Math.PI / 2 + TAU * dockT / 100); ctx.stroke(); }
+  ctx.restore();
+
+  for (const c of crates) {
+    ctx.save(); ctx.translate(c.x, c.y); ctx.rotate(frame * 0.02);
+    ctx.fillStyle = c.type === 'fuel' ? '#2bd97c' : '#3fa0ff'; ctx.fillRect(-11, -11, 22, 22);
+    ctx.fillStyle = '#fff'; ctx.fillRect(-2, -7, 4, 14); if (c.type === 'repair') ctx.fillRect(-7, -2, 14, 4);
+    ctx.restore();
+  }
+  for (const r of rocks) {
+    ctx.save(); ctx.translate(r.x, r.y); ctx.rotate(r.rot);
+    ctx.fillStyle = '#8c8174'; ctx.strokeStyle = '#5b5348'; ctx.lineWidth = 2; ctx.beginPath();
+    r.shape.forEach((k, i) => { const a = i / r.shape.length * TAU; ctx.lineTo(Math.cos(a) * r.r * k, Math.sin(a) * r.r * k); });
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = 'rgba(0,0,0,0.18)'; ctx.beginPath(); ctx.arc(r.r * 0.25, -r.r * 0.2, r.r * 0.22, 0, TAU); ctx.fill();
+    ctx.restore();
+  }
+  foes.forEach(drawFoe);
+  ctx.fillStyle = '#7dffb3'; for (const b of bullets) { ctx.save(); ctx.translate(b.x, b.y); ctx.rotate(Math.atan2(b.vy, b.vx)); ctx.fillRect(-7, -2, 14, 4); ctx.restore(); }
+  ctx.fillStyle = '#ff4d6d'; for (const b of ebullets) { ctx.beginPath(); ctx.arc(b.x, b.y, 5, 0, TAU); ctx.fill(); }
+  if (state === 'playing' || state === 'brief') drawShip(ship);
+  for (const p of parts) { ctx.globalAlpha = Math.max(0, p.life / p.max); ctx.fillStyle = p.color; ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3); }
+  ctx.globalAlpha = 1;
+}
+
+function bar(x, y, w, v, color, label) {
+  ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(x, y, w, 10);
+  ctx.fillStyle = color; ctx.fillRect(x, y, w * Math.max(0, Math.min(1, v)), 10);
+  ctx.fillStyle = '#fff'; ctx.font = '11px sans-serif'; ctx.textAlign = 'left'; ctx.fillText(label, x + w + 6, y + 9);
+}
+
+function drawHUD() {
+  const s = ship;
+  bar(12, 12, 110, s.hull / 100, s.hull > 30 ? '#4de08a' : '#ff4d6d', 'HULL');
+  bar(12, 28, 110, s.fuel / 100, '#ffd166', 'FUEL');
+  bar(12, 44, 110, s.heat / 100, s.over ? '#ff4d6d' : '#ff9f1c', s.over ? 'OVERHEAT' : 'LASER');
+  const spd = Math.hypot(s.vx, s.vy);
+  ctx.fillStyle = '#fff'; ctx.font = '13px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText('Speed ' + (spd * 4).toFixed(1) + ' km/s', 12, 78);
+  ctx.fillText('Score ' + score, 12, 96);
+
+  const D = bodies[1], dist = Math.hypot(D.x - s.x, D.y - s.y);
+  ctx.textAlign = 'center'; ctx.font = 'bold 14px sans-serif'; ctx.fillStyle = '#ffd166';
+  ctx.fillText(S.name + '  >  ' + S.dest.name, W / 2, 20);
+  ctx.font = '12px sans-serif'; ctx.fillStyle = '#cfd8ff';
+  ctx.fillText('Distance ' + Math.round(dist * 40).toLocaleString() + ' km', W / 2, 38);
+  if (dist < D.r + 170 && !bossAlive) {
+    ctx.font = 'bold 15px sans-serif';
+    ctx.fillStyle = spd < 2.4 ? '#7dffb3' : '#ff9f9f';
+    ctx.fillText(spd < 2.4 ? 'DOCKING... hold steady' : 'Too fast! Slow down to dock (use BRAKE)', W / 2, 62);
+  }
+  if (s.fuel <= 0 && reserveUsed) { ctx.fillStyle = '#ff4d6d'; ctx.font = 'bold 15px sans-serif'; ctx.fillText('OUT OF FUEL: drift to a green cell!', W / 2, 62); }
+  const bs = foes.find(f => f.type === 'b');
+  if (bs) {
+    ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(W / 2 - 110, 74, 220, 8);
+    ctx.fillStyle = '#c77dff'; ctx.fillRect(W / 2 - 110, 74, 220 * bs.hp / bs.max, 8);
+    ctx.fillStyle = '#fff'; ctx.font = '11px sans-serif'; ctx.fillText('ROGUE AI WARSHIP', W / 2, 96);
+  }
+
+  // radar
+  const rx = W - 62, ry = 70, rr = 50, range = 1600;
+  ctx.fillStyle = 'rgba(10,20,40,0.6)'; ctx.beginPath(); ctx.arc(rx, ry, rr, 0, TAU); ctx.fill();
+  ctx.strokeStyle = 'rgba(120,180,255,0.5)'; ctx.lineWidth = 1; ctx.stroke();
+  const dot = (x, y, c, sz) => {
+    let dx = (x - s.x) / range * rr, dy = (y - s.y) / range * rr, m = Math.hypot(dx, dy);
+    if (m > rr - 3) return false;
+    ctx.fillStyle = c; ctx.fillRect(rx + dx - sz / 2, ry + dy - sz / 2, sz, sz); return true;
+  };
+  crates.forEach(c => dot(c.x, c.y, c.type === 'fuel' ? '#2bd97c' : '#3fa0ff', 3));
+  foes.forEach(f => dot(f.x, f.y, '#ff4d6d', f.type === 'b' ? 7 : 4));
+  if (!dot(D.x, D.y, '#ffd166', 7)) {
+    const a = Math.atan2(D.y - s.y, D.x - s.x);
+    ctx.fillStyle = '#ffd166'; ctx.beginPath();
+    ctx.moveTo(rx + Math.cos(a) * (rr - 2), ry + Math.sin(a) * (rr - 2));
+    ctx.lineTo(rx + Math.cos(a + 2.7) * (rr - 14), ry + Math.sin(a + 2.7) * (rr - 14));
+    ctx.lineTo(rx + Math.cos(a - 2.7) * (rr - 14), ry + Math.sin(a - 2.7) * (rr - 14)); ctx.fill();
+  }
+  ctx.fillStyle = '#fff'; ctx.fillRect(rx - 2, ry - 2, 4, 4);
+
+  // dialogue
+  if (dialog.length) {
+    const d = dialog[0], bw = Math.min(W - 24, 460), bx = (W - bw) / 2, by = H * 0.2;
+    ctx.fillStyle = 'rgba(8,14,34,0.85)'; ctx.fillRect(bx, by, bw, 78);
+    ctx.strokeStyle = '#4dd0ff'; ctx.lineWidth = 1.5; ctx.strokeRect(bx, by, bw, 78);
+    ctx.textAlign = 'left'; ctx.fillStyle = '#4dd0ff'; ctx.font = 'bold 12px sans-serif'; ctx.fillText(d.who, bx + 12, by + 20);
+    ctx.fillStyle = '#fff'; ctx.font = '13px sans-serif'; wrap(d.text, bx + 12, by + 40, bw - 24, 17);
+  }
+
+  // touch controls
+  if (isTouch) {
+    const b = btns();
+    if (joy.id !== null) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(joy.ox, joy.oy, 50, 0, TAU); ctx.stroke();
+      const dx = joy.x - joy.ox, dy = joy.y - joy.oy, m = Math.min(50, Math.hypot(dx, dy)), a = Math.atan2(dy, dx);
+      ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.beginPath(); ctx.arc(joy.ox + Math.cos(a) * m, joy.oy + Math.sin(a) * m, 24, 0, TAU); ctx.fill();
+    } else { ctx.fillStyle = 'rgba(255,255,255,0.3)'; ctx.font = '13px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('Touch & drag here to fly', W * 0.28, H - 60); }
+    ctx.textAlign = 'center';
+    ctx.fillStyle = fireId !== null ? 'rgba(255,90,110,0.7)' : 'rgba(255,90,110,0.35)'; ctx.beginPath(); ctx.arc(b.fire.x, b.fire.y, b.fire.r, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 15px sans-serif'; ctx.fillText('FIRE', b.fire.x, b.fire.y + 5);
+    ctx.fillStyle = brakeId !== null ? 'rgba(80,170,255,0.7)' : 'rgba(80,170,255,0.35)'; ctx.beginPath(); ctx.arc(b.brake.x, b.brake.y, b.brake.r, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 12px sans-serif'; ctx.fillText('BRAKE', b.brake.x, b.brake.y + 4);
+  }
+}
+
+function panel(title, color, lines, hint) {
+  ctx.fillStyle = 'rgba(4,6,18,0.82)'; ctx.fillRect(0, 0, W, H);
+  const mw = Math.min(W - 40, 520), x = W / 2;
+  ctx.textAlign = 'center'; ctx.fillStyle = color; ctx.font = 'bold ' + Math.min(30, W / 13) + 'px sans-serif';
+  let y = H * 0.2; y = wrap(title, x, y, mw, 36);
+  ctx.textAlign = 'center'; ctx.fillStyle = '#e8ecff'; ctx.font = '16px sans-serif';
+  for (const l of lines) y = wrap(l, x, y + 12, mw, 23);
+  ctx.fillStyle = '#7dffb3'; ctx.font = 'bold 16px sans-serif'; ctx.fillText(hint, x, Math.max(y + 36, H * 0.8));
+}
+
+function menuBtns() { return { nw: { x: W / 2 - 120, y: H * 0.6, w: 240, h: 52 }, ct: { x: W / 2 - 120, y: H * 0.6 + 68, w: 240, h: 52 } }; }
+
+function draw() {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#04050d'); g.addColorStop(1, '#14103a');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = '#fff';
+  for (const st of stars) {
+    const x = (((st.x - cam.x * st.z) % W) + W) % W, y = (((st.y - cam.y * st.z) % H) + H) % H;
+    ctx.globalAlpha = 0.4 + st.z; ctx.fillRect(x, y, st.s, st.s);
+  }
+  ctx.globalAlpha = 1;
+
+  if (state === 'menu') {
+    ctx.textAlign = 'center'; ctx.fillStyle = '#4dd0ff'; ctx.font = 'bold ' + Math.min(48, W / 9) + 'px sans-serif';
+    ctx.fillText('STAR VOYAGER', W / 2, H * 0.25);
+    ctx.fillStyle = '#ffd166'; ctx.font = 'bold ' + Math.min(24, W / 16) + 'px sans-serif'; ctx.fillText('Mission to Titan', W / 2, H * 0.25 + 36);
+    ctx.fillStyle = '#cfd8ff'; ctx.font = '15px sans-serif';
+    ctx.fillText('Fly from Earth to Saturn through the real solar system.', W / 2, H * 0.42);
+    ctx.fillText('Real inertia. Limited fuel. Pirates. A rogue AI.', W / 2, H * 0.42 + 24);
+    const b = menuBtns();
+    ctx.fillStyle = '#1b6fa8'; ctx.fillRect(b.nw.x, b.nw.y, b.nw.w, b.nw.h);
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 18px sans-serif'; ctx.fillText('NEW MISSION', W / 2, b.nw.y + 33);
+    if (saved > 0) {
+      ctx.fillStyle = '#2a8a5c'; ctx.fillRect(b.ct.x, b.ct.y, b.ct.w, b.ct.h);
+      ctx.fillStyle = '#fff'; ctx.fillText('CONTINUE: SECTOR ' + (Math.min(saved, SECTORS.length - 1) + 1), W / 2, b.ct.y + 33);
+    }
+    ctx.fillStyle = '#8a93b8'; ctx.font = '13px sans-serif';
+    ctx.fillText('Keyboard: A/D turn, W thrust, S brake, Space fire', W / 2, H - 28);
+    return;
+  }
+
+  ctx.save();
+  if (shake > 0) ctx.translate(rand(-4, 4), rand(-4, 4));
+  ctx.translate(W / 2 - cam.x, H / 2 - cam.y);
+  drawWorld();
+  ctx.restore();
+
+  if (flash > 0) { ctx.fillStyle = 'rgba(255,60,60,' + flash / 40 + ')'; ctx.fillRect(0, 0, W, H); }
+  if (state === 'playing' || state === 'gameover') drawHUD();
+
+  if (state === 'brief') panel('SECTOR ' + (sec + 1) + ': ' + S.name.toUpperCase(), '#4dd0ff', [S.from.name || '', 'Destination: ' + S.dest.name, S.intro].filter(Boolean).slice(1), 'Tap or press Enter to launch');
+  else if (state === 'fact') panel('DOCKED: ' + S.dest.name.toUpperCase(), '#ffd166', ['Did you know? ' + S.factTitle, S.fact, 'Bonus points awarded. Score: ' + score], sec + 1 >= SECTORS.length ? 'Tap to continue' : 'Tap for the next sector');
+  else if (state === 'gameover') panel('MISSION FAILED', '#ff4d6d', [gameoverMsg, 'Score: ' + score], 'Tap or press Enter to retry this sector');
+  else if (state === 'win') panel('MISSION COMPLETE!', '#7dffb3', ['You saved Titan Colony, Commander!', 'You flew across the whole solar system.', 'Final score: ' + score], 'Tap to return to the menu');
+}
+
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+loop();
+</script>
+</body>
+</html>

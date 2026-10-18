@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Star Voyager: Titan Signal</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #03040a; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script>
+// =====================================================================
+//  STAR VOYAGER: TITAN SIGNAL
+//  A realistic-physics solar system adventure.
+//  - Newtonian flight: you keep your momentum, gravity bends your path
+//  - Planets orbit the Sun using Kepler's law (period depends on distance)
+//  - Fuel, oxygen and hull are limited: plan your burns
+//  - Story events with choices, pirates, solar flares, real planet facts
+// =====================================================================
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const TAU = Math.PI * 2;
+let W = 0, H = 0, z = 1, DPR = 1;
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const angDiff = (a, b) => { let d = (b - a) % TAU; if (d > Math.PI) d -= TAU; if (d < -Math.PI) d += TAU; return d; };
+
+// ---------- Constants ----------
+const G_SUN = 4500;          // Sun's gravitational parameter (game units)
+const UNIT_MKM = 0.1;        // 1 world unit = 0.1 million km
+const SPEED_KMS = 17.3;      // 1 unit/frame = 17.3 km/s (Earth ~ 30 km/s)
+const MAX_SPEED = 9;
+const THRUST = 0.07;
+const FUEL_BURN = 0.06;
+const LAND_SPEED = 2.2;
+
+// ---------- Real facts shown when you land ----------
+const INFO = {
+  earth: { title: 'Earth Orbital Station', text: 'Home. Earth orbits the Sun at about 30 km/s and takes 365 days for one lap. Mission Control tops up your fuel, oxygen and hull.', supply: { fuel: 100, o2: 100, hull: 100 }, always: true },
+  mars: { title: 'Mars: Ares Outpost', frag: true, text: 'Mars has Olympus Mons, a volcano about 22 km high, the tallest in the solar system. Its thin atmosphere is mostly carbon dioxide, and there is water ice at the poles. A day lasts 24 h 37 min. The outpost hands you the first decoding fragment and mines ice for fuel.', supply: { fuel: 40, o2: 50, hull: 30 } },
+  ceres: { title: 'Ceres: Belt Station', frag: true, text: 'Ceres is a dwarf planet about 940 km wide, the largest object in the asteroid belt. It holds a lot of water ice, and bright salt deposits shine inside Occator Crater. Miners here share a fragment and fill your tanks.', supply: { fuel: 50, o2: 40, hull: 20 } },
+  jupiter: { title: 'Jupiter: Orbital Scan', frag: true, scan: true, text: 'Jupiter has more than twice the mass of all the other planets combined. Its Great Red Spot is a storm wider than Earth that has raged for centuries. A day lasts only about 10 hours. Intense radiation belts hit your hull while the probe pulls a fragment from the relay buoy.', supply: { hull: -8 } },
+  saturn: { title: 'Saturn: Orbital Scan', frag: true, scan: true, text: "Saturn's rings are mostly water ice, span about 280,000 km, and are often only around 10 metres thick. The planet is so light it would float in a big enough bath of water. Your scanner picks up the last fragment from a relay on the ring edge.", supply: {} },
+  titan: { title: 'Titan', text: 'Titan is the only moon with a thick atmosphere. It has rivers and lakes of liquid methane and ethane, and an ice crust over a possible ocean of water. The signal is coming from here.', supply: { fuel: 100, o2: 40 } }
+};
+const CHAIN = ['mars', 'ceres', 'jupiter', 'saturn', 'titan'];
+const FRAG_IDS = ['mars', 'ceres', 'jupiter', 'saturn'];
+
+// ---------- State ----------
+let state = 'menu';            // menu | play | over | win
+let dlg = null, frame = 0, deathReason = '', ending = null;
+let bodies = [], byId = {}, belt = [], pirates = [], shots = [], eshots = [], pickups = [], parts = [], toasts = [];
+let ship, flare, nextFlare, beacon, visited, score, stats, shake = 0, stars = [];
+let keys = {}, pointers = {}, ptrHeld = {}, showButtons = false, buttons = [];
+let best = 0;
+try { best = +localStorage.getItem('starVoyagerBest2') || 0; } catch (e) {}
+
+for (let i = 0; i < 160; i++) stars.push({ x: Math.random(), y: Math.random(), s: Math.random() * 1.6 + 0.4, l: Math.floor(Math.random() * 3) });
+
+// ---------- Layout ----------
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2.5);
+  W = innerWidth; H = innerHeight;
+  canvas.width = Math.round(W * DPR); canvas.height = Math.round(H * DPR);
+  z = clamp(Math.min(W, H) / 640, 0.6, 1.1);
+  const R = clamp(Math.min(W, H) * 0.075, 28, 42), m = 12;
+  // Left half of the screen is the joystick. Buttons live on the right.
+  buttons = [
+    { id: 'fire', x: W - R - m, y: H - R - m, r: R, t: 'LASER' },
+    { id: 'brake', x: W - 3 * R - 2 * m - 6, y: H - R - m, r: R, t: 'BRAKE' },
+    { id: 'act', x: W - R - m, y: H - 3 * R - 2 * m - 6, r: R, t: 'E' }
+  ];
+}
+addEventListener('resize', resize); resize();
+
+// ---------- World ----------
+function makeWorld() {
+  bodies = []; byId = {};
+  const sun = { id: 'sun', name: 'The Sun', kind: 'star', r: 110, gm: G_SUN, x: 0, y: 0, vx: 0, vy: 0, R: 0, ang: 0, w: 0 };
+  bodies.push(sun); byId.sun = sun;
+  const P = (id, name, kind, r, gm, R, ang, c1, c2, parent) => {
+    const b = { id, name, kind, r, gm, R, ang, c1, c2, parent: parent || sun, x: 0, y: 0, vx: 0, vy: 0 };
+    b.w = Math.sqrt(b.parent.gm / (R * R * R));   // Kepler: closer orbits are faster
+    bodies.push(b); byId[id] = b; return b;
+  };
+  P('earth', 'Earth', 'rock', 38, 65, 1500, 0, '#7ec4ff', '#0b2f6b');
+  P('mars', 'Mars', 'rock', 30, 36, 2600, 2.2, '#e8855a', '#6b2a14');
+  P('ceres', 'Ceres', 'rock', 18, 10, 3800, 4.0, '#cfc7bd', '#5a5148');
+  P('jupiter', 'Jupiter', 'gas', 100, 500, 5800, 5.2, '#f0d2a8', '#8a5a34');
+  const sat = P('saturn', 'Saturn', 'gas', 86, 330, 7800, 0.9, '#f3e2b0', '#9a7b43');
+  P('titan', 'Titan', 'rock', 22, 19, 300, 1.0, '#e6b45a', '#6a4713', sat);
+  stepBodies(0);
+
+  belt = [];
+  for (let i = 0; i < 260; i++) {
+    const R = rand(3400, 4250), size = rand(4, 16), pts = [];
+    for (let k = 0; k < 8; k++) pts.push(rand(0.7, 1.1));
+    belt.push({ R, ang: rand(0, TAU), w: Math.sqrt(G_SUN / (R * R * R)), size, hp: Math.ceil(size / 5), pts, rot: rand(0, TAU), vr: rand(-0.02, 0.02), x: 0, y: 0, vx: 0, vy: 0, dead: false });
+  }
+  stepBelt(0);
+}
+
+function stepBodies(s) {
+  for (const b of bodies) {
+    if (b.id === 'sun') continue;
+    b.ang += b.w * s;
+    const p = b.parent, c = Math.cos(b.ang), sn = Math.sin(b.ang);
+    b.x = p.x + c * b.R; b.y = p.y + sn * b.R;
+    b.vx = p.vx - sn * b.R * b.w; b.vy = p.vy + c * b.R * b.w;
+  }
+}
+function stepBelt(s) {
+  for (const a of belt) {
+    a.ang += a.w * s; a.rot += a.vr * s;
+    const c = Math.cos(a.ang), sn = Math.sin(a.ang);
+    a.x = c * a.R; a.y = sn * a.R; a.vx = -sn * a.R * a.w; a.vy = c * a.R * a.w;
+  }
+}
+
+function reset() {
+  frame = 0; makeWorld();
+  const e = byId.earth;
+  ship = { x: e.x, y: e.y - 110, vx: e.vx + 0.77, vy: e.vy, a: 0, hull: 100, fuel: 100, o2: 100, cool: 0, inv: 0, shield: 0 };
+  pirates = []; shots = []; eshots = []; pickups = []; parts = []; toasts = [];
+  flare = null; nextFlare = 3600 + rand(0, 3600);
+  const bR = 3600, bAng = rand(0, TAU);
+  beacon = { R: bR, ang: bAng, w: Math.sqrt(G_SUN / (bR ** 3)), x: 0, y: 0, done: false };
+  visited = {}; score = 0; shake = 0; ending = null; deathReason = '';
+  stats = { kills: 0, ore: 0, saved: false };
+  state = 'play';
+  openDlg('MISSION BRIEFING', "2087: a coded signal comes from Saturn's moon Titan. Its key is split into 4 fragments at stations on Mars, Ceres, Jupiter and Saturn. You captain survey ship Voyager-7, in orbit around Earth.\n\nPHYSICS: no air in space, so you keep your speed until you burn against it. Gravity bends your path. Fuel, oxygen and hull are limited.\n\nCONTROLS: drag on the LEFT side like a joystick (ship turns where you point, push further to burn). LASER fires. BRAKE slows you to your target's speed. E lands, scans or raises shields. Follow the yellow arrow.\n\nTap anywhere to begin.", [{ t: 'Begin the mission', fn: closeDlg }]);
+  toast('Objective: reach Mars and recover the first fragment');
+}
+
+// ---------- UI helpers ----------
+function toast(t) { toasts.push({ t, life: 260 }); if (toasts.length > 4) toasts.shift(); }
+function openDlg(title, text, opts) { dlg = { title, text, opts, rects: [] }; }
+function closeDlg() { dlg = null; }
+function wrap(t, maxw) {
+  const out = [];
+  for (const para of t.split('\n')) {
+    if (!para) { out.push(''); continue; }
+    let line = '';
+    for (const w of para.split(' ')) {
+      const test = line ? line + ' ' + w : w;
+      if (ctx.measureText(test).width > maxw && line) { out.push(line); line = w; } else line = test;
+    }
+    out.push(line);
+  }
+  return out;
+}
+function boom(x, y, color, n = 16, sp = 4) {
+  for (let i = 0; i < n; i++) { const a = rand(0, TAU), s = rand(0.5, sp); parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: rand(20, 50), c: color }); }
+}
+const objective = () => { for (const id of CHAIN) if (!visited[id]) return byId[id]; return null; };
+const fragCount = () => FRAG_IDS.filter(i => visited[i]).length;
+
+// ---------- Input ----------
+function pressAct() {
+  if (state !== 'play' || dlg) return;
+  if (flare && !flare.shielded) {
+    if (ship.fuel >= 5) { ship.fuel -= 5; flare.shielded = true; ship.shield = 160; toast('Shields up! Flare deflected (-5 fuel)'); }
+    else toast('Not enough fuel to power the shields!');
+    return;
+  }
+  const b = landable();
+  if (b) land(b);
+  else toast('Nothing in range. Get close to a world and slow down.');
+}
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  keys[k] = true;
+  if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(k)) e.preventDefault();
+  if (state === 'menu' || state === 'over' || state === 'win') { if (k === 'enter' || k === ' ') reset(); return; }
+  if (dlg) {
+    const n = parseInt(k, 10);
+    if (n >= 1 && n <= dlg.opts.length) dlg.opts[n - 1].fn();
+    else if ((k === 'enter' || k === ' ' || k === 'e') && dlg.opts.length === 1) dlg.opts[0].fn();
+    return;
+  }
+  if (k === 'e') pressAct();
+});
+addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; });
+
+function recomputeHeld() {
+  ptrHeld = {};
+  for (const id in pointers) { const p = pointers[id]; for (const b of buttons) if (Math.hypot(p.x - b.x, p.y - b.y) < b.r + 12) ptrHeld[b.id] = true; }
+}
+function handleTap(x, y) {
+  if (state !== 'play') { reset(); return; }
+  if (dlg) { if (dlg.opts.length === 1) { dlg.opts[0].fn(); return; } for (let i = 0; i < dlg.rects.length; i++) { const r = dlg.rects[i]; if (x > r.x && x < r.x + r.w && y > r.y && y < r.y + r.h) { dlg.opts[i].fn(); return; } } return; }
+  const b = buttons.find(b => b.id === 'act');
+  if (Math.hypot(x - b.x, y - b.y) < b.r + 12) pressAct();
+}
+// Floating joystick: touch the left half, then drag. The ship turns toward the
+// stick direction and burns when you push it far enough.
+let joy = null;
+const JOY_R = 60;
+canvas.addEventListener('pointerdown', e => {
+  e.preventDefault();
+  if (e.pointerType === 'touch') showButtons = true;
+  pointers[e.pointerId] = { x: e.clientX, y: e.clientY }; recomputeHeld(); handleTap(e.clientX, e.clientY);
+  if (state === 'play' && !dlg && !joy && e.clientX < W * 0.55) joy = { id: e.pointerId, bx: e.clientX, by: e.clientY, x: e.clientX, y: e.clientY };
+});
+canvas.addEventListener('pointermove', e => {
+  if (pointers[e.pointerId]) { pointers[e.pointerId] = { x: e.clientX, y: e.clientY }; recomputeHeld(); }
+  if (joy && joy.id === e.pointerId) { joy.x = e.clientX; joy.y = e.clientY; }
+});
+const endPtr = e => { delete pointers[e.pointerId]; recomputeHeld(); if (joy && joy.id === e.pointerId) joy = null; };
+canvas.addEventListener('pointerup', endPtr); canvas.addEventListener('pointercancel', endPtr); canvas.addEventListener('pointerleave', endPtr);
+
+const held = id => {
+  const K = { left: keys['arrowleft'] || keys['a'], right: keys['arrowright'] || keys['d'], thrust: keys['arrowup'] || keys['w'], brake: keys['s'] || keys['arrowdown'], fire: keys[' '] };
+  return !!(K[id] || ptrHeld[id]);
+};
+
+// ---------- Landing and story ----------
+function landable() {
+  for (const b of bodies) {
+    if (b.id === 'sun') continue;
+    const d = Math.hypot(ship.x - b.x, ship.y - b.y) - b.r;
+    if (d < 95) { const rs = Math.hypot(ship.vx - b.vx, ship.vy - b.vy); if (rs < LAND_SPEED) return b; }
+  }
+  return null;
+}
+function land(b) {
+  const info = INFO[b.id]; if (!info) return;
+  const first = !visited[b.id];
+  if (b.id === 'titan' && fragCount() < 4) {
+    openDlg('TITAN: SIGNAL UNREADABLE', 'The signal is a wall of static. You only hold ' + fragCount() + ' of 4 decoding fragments. Visit Mars, Ceres, Jupiter and Saturn first.', [{ t: 'Return to orbit', fn: closeDlg }]);
+    return;
+  }
+  visited[b.id] = true;
+  let extra = [];
+  if (info.always || first) {
+    const s = info.supply || {};
+    if (s.fuel) { ship.fuel = clamp(ship.fuel + s.fuel, 0, 100); extra.push('fuel +' + s.fuel); }
+    if (s.o2) { ship.o2 = clamp(ship.o2 + s.o2, 0, 100); extra.push('oxygen +' + s.o2); }
+    if (s.hull) { ship.hull = clamp(ship.hull + s.hull, 0, 100); extra.push(s.hull > 0 ? 'hull repaired' : 'radiation damage ' + s.hull); }
+    if (first && b.id !== 'earth') { score += 500; }
+  }
+  if (b.id === 'titan') return finale();
+  let text = info.text;
+  if (info.frag && first) text += '\n\nDECODING FRAGMENT ' + fragCount() + ' OF 4 RECOVERED.';
+  if (!first && !info.always) text += '\n\n(You have already visited this world.)';
+  if (extra.length) text += '\n\nSupplies: ' + extra.join(', ') + '.';
+  const nxt = objective();
+  if (nxt && b.id !== 'earth') text += '\nNext objective: ' + nxt.name + '.';
+  if (ship.hull <= 0) return die('Killed by radiation at Jupiter');
+  openDlg(info.title.toUpperCase(), text, [{ t: info.scan ? 'Leave orbit' : 'Launch', fn: () => { closeDlg(); const o = objective(); if (o) toast('Objective: ' + o.name); } }]);
+}
+function finale() {
+  openDlg('TITAN: THE SIGNAL', 'The four fragments lock together and the signal decodes. It is a message in mathematics: prime numbers, then a map of the solar system, then a coordinate pointing at a spot below the ice.\n\nYour sensors find a structure under the surface, billions of years old and still sending.\n\nWhat do you do?', [
+    { t: 'Broadcast a reply to the stars', fn: () => endGame('FIRST CONTACT', 'You send back the primes and a picture of Earth. Seconds later the structure answers, and a gate opens in the ice. Humanity is no longer alone.') },
+    { t: 'Recover a sample and bring it home', fn: () => endGame('HOMECOMING', 'You carry a fragment of the artifact back to Earth. Scientists will spend generations studying it. You are the captain who brought back the first proof of another mind.') },
+    { t: 'Seal the site and report to Earth', fn: () => endGame('THE CAREFUL PATH', 'You mark the site, leave it untouched and send your findings home. Years later a full international expedition returns, prepared. Some doors are worth opening slowly.') }
+  ]);
+}
+function endGame(title, text) {
+  closeDlg();
+  score += 2000 + Math.round(ship.fuel * 10) + Math.round(ship.hull * 5);
+  if (score > best) { best = score; try { localStorage.setItem('starVoyagerBest2', best); } catch (e) {} }
+  ending = { title, text }; state = 'win';
+}
+function die(reason) {
+  if (state !== 'play') return;
+  deathReason = reason; boom(ship.x, ship.y, '#ffb347', 60, 6); shake = 25; state = 'over'; dlg = null;
+  if (score > best) { best = score; try { localStorage.setItem('starVoyagerBest2', best); } catch (e) {} }
+}
+function beaconEvent() {
+  beacon.done = true;
+  openDlg('DISTRESS BEACON', "A cargo hauler, the Lark, drifts with its hull cracked open. A faint voice crackles: 'Anyone... our oxygen is failing... please...'\n\nYou can also see its cargo of fuel cells floating nearby.", [
+    { t: 'Rescue the crew (-10 fuel). They give you oxygen as thanks.', fn: () => { ship.fuel = Math.max(0, ship.fuel - 10); ship.o2 = clamp(ship.o2 + 30, 0, 100); score += 400; stats.saved = true; toast('Crew rescued! +30 oxygen'); closeDlg(); } },
+    { t: 'Salvage the cargo and leave (+30 fuel). Risky.', fn: () => { ship.fuel = clamp(ship.fuel + 30, 0, 100); score += 100; toast('Raiders are locking onto you! Use the laser!'); spawnPirate(); spawnPirate(); closeDlg(); } },
+    { t: 'Ignore it and fly on', fn: () => { toast('The signal fades behind you.'); closeDlg(); } }
+  ]);
+}
+function spawnPirate() {
+  const a = rand(0, TAU), d = 650;
+  pirates.push({ x: ship.x + Math.cos(a) * d, y: ship.y + Math.sin(a) * d, vx: ship.vx, vy: ship.vy, a: 0, hp: 4, cool: rand(40, 100) });
+}
+
+// ---------- Update ----------
+function update() {
+  if (state === 'play' && !dlg) frame++;
+  // starfield and particles still move on menu
+  if (state !== 'play' || dlg) { for (const p of parts) { p.x += p.vx; p.y += p.vy; p.life--; } parts = parts.filter(p => p.life > 0); if (state === 'menu') return; if (dlg) return; }
+  if (state !== 'play') return;
+
+  stepBodies(1); stepBelt(1);
+  beacon.ang += beacon.w; beacon.x = Math.cos(beacon.ang) * beacon.R; beacon.y = Math.sin(beacon.ang) * beacon.R;
+
+  // --- ship controls ---
+  if (held('left')) ship.a -= 0.05;
+  if (held('right')) ship.a += 0.05;
+  let thrusting = held('thrust');
+  if (joy && !dlg) {
+    const jx = joy.x - joy.bx, jy = joy.y - joy.by, len = Math.min(Math.hypot(jx, jy), JOY_R), mag = len / JOY_R;
+    if (mag > 0.15) {
+      const d = angDiff(ship.a, Math.atan2(jy, jx));
+      ship.a += clamp(d, -0.1, 0.1);
+      if (mag > 0.4 && Math.abs(d) < 0.7) thrusting = true;   // push the stick to burn
+    }
+  }
+  const target = objective() || byId.earth;
+  if (held('brake')) {
+    // auto-match velocity with the target body (retrograde burn)
+    const rvx = ship.vx - target.vx, rvy = ship.vy - target.vy, mag = Math.hypot(rvx, rvy);
+    if (mag > 0.06) {
+      const want = Math.atan2(-rvy, -rvx), d = angDiff(ship.a, want);
+      ship.a += clamp(d, -0.07, 0.07);
+      if (Math.abs(d) < 0.25) thrusting = true;
+    }
+  }
+  if (thrusting && ship.fuel > 0) {
+    ship.vx += Math.cos(ship.a) * THRUST; ship.vy += Math.sin(ship.a) * THRUST; ship.fuel -= FUEL_BURN;
+    for (let i = 0; i < 2; i++) parts.push({ x: ship.x - Math.cos(ship.a) * 14, y: ship.y - Math.sin(ship.a) * 14, vx: ship.vx - Math.cos(ship.a) * rand(1, 3) + rand(-0.3, 0.3), vy: ship.vy - Math.sin(ship.a) * rand(1, 3) + rand(-0.3, 0.3), life: 18, c: '#ffae42' });
+    ship.thrusting = true;
+  } else ship.thrusting = false;
+  if (thrusting && ship.fuel <= 0 && frame % 120 === 0) toast('OUT OF FUEL! You are drifting.');
+  ship.fuel = Math.max(0, ship.fuel);
+
+  // --- laser ---
+  if (ship.cool > 0) ship.cool--;
+  if (held('fire') && ship.cool <= 0) {
+    shots.push({ x: ship.x + Math.cos(ship.a) * 16, y: ship.y + Math.sin(ship.a) * 16, vx: ship.vx + Math.cos(ship.a) * 10, vy: ship.vy + Math.sin(ship.a) * 10, life: 55 });
+    ship.cool = 9;
+  }
+
+  // --- gravity (every body pulls you) ---
+  for (const b of bodies) {
+    const dx = b.x - ship.x, dy = b.y - ship.y;
+    const d2 = Math.max(dx * dx + dy * dy, b.r * b.r), d = Math.sqrt(d2), a = b.gm / d2;
+    ship.vx += dx / d * a; ship.vy += dy / d * a;
+  }
+  const sp = Math.hypot(ship.vx, ship.vy);
+  if (sp > MAX_SPEED) { ship.vx *= MAX_SPEED / sp; ship.vy *= MAX_SPEED / sp; }
+  ship.x += ship.vx; ship.y += ship.vy;
+  if (ship.inv > 0) ship.inv--; if (ship.shield > 0) ship.shield--;
+
+  // --- life support ---
+  ship.o2 -= 0.006;
+  if (ship.o2 <= 0) return die('Ran out of oxygen');
+  if (ship.o2 < 20 && frame % 240 === 0) toast('WARNING: oxygen low. Find a station or an oxygen tank.');
+  if (ship.fuel < 15 && ship.fuel > 0 && frame % 300 === 0) toast('WARNING: fuel low.');
+
+  // --- collisions with planets / sun ---
+  for (const b of bodies) {
+    const dx = ship.x - b.x, dy = ship.y - b.y, d = Math.hypot(dx, dy);
+    if (b.id === 'sun') {
+      if (d < b.r) return die('Burned up in the Sun');
+      if (d < 520) { ship.hull -= (520 - d) / 520 * 0.05; if (frame % 150 === 0) toast('HEAT WARNING: too close to the Sun!'); if (ship.hull <= 0) return die('Overheated near the Sun'); }
+      continue;
+    }
+    if (d < b.r + 6) {
+      const nx = dx / d, ny = dy / d, rvx = ship.vx - b.vx, rvy = ship.vy - b.vy, vn = rvx * nx + rvy * ny;
+      ship.x = b.x + nx * (b.r + 7); ship.y = b.y + ny * (b.r + 7);
+      if (vn < 0) { ship.vx = b.vx + rvx - nx * vn * 1.3; ship.vy = b.vy + rvy - ny * vn * 1.3; }
+      if (-vn > 2.4 && ship.inv <= 0) { ship.hull -= -vn * 9; ship.inv = 40; shake = 14; boom(ship.x, ship.y, '#ff8844', 18); toast('Hard impact on ' + b.name + '!'); if (ship.hull <= 0) return die('Crashed into ' + b.name); }
+    }
+  }
+  // --- asteroids ---
+  for (const a of belt) {
+    if (a.dead) continue;
+    const dx = ship.x - a.x, dy = ship.y - a.y;
+    if (Math.abs(dx) > 400 || Math.abs(dy) > 400) continue;
+    const d = Math.hypot(dx, dy);
+    if (d < a.size + 10) {
+      const nx = dx / d, ny = dy / d, rvx = ship.vx - a.vx, rvy = ship.vy - a.vy, rs = Math.hypot(rvx, rvy), vn = rvx * nx + rvy * ny;
+      ship.x = a.x + nx * (a.size + 11); ship.y = a.y + ny * (a.size + 11);
+      if (vn < 0) { ship.vx = a.vx + rvx - nx * vn * 1.5; ship.vy = a.vy + rvy - ny * vn * 1.5; }
+      if (ship.inv <= 0 && rs > 1.2) { ship.hull -= (rs - 0.8) * 6; ship.inv = 30; shake = 10; boom(ship.x, ship.y, '#c8b8a0', 10); if (ship.hull <= 0) return die('Smashed by an asteroid'); }
+    }
+  }
+  // --- beacon ---
+  if (!beacon.done && Math.hypot(ship.x - beacon.x, ship.y - beacon.y) < 130) { beaconEvent(); return; }
+  if (!beacon.done && frame === 300) toast('A distress signal pings from the asteroid belt...');
+
+  // --- shots ---
+  for (const s of shots) {
+    s.x += s.vx; s.y += s.vy; s.life--;
+    for (const a of belt) { if (a.dead || s.life <= 0) continue; if (Math.abs(s.x - a.x) < a.size + 6 && Math.abs(s.y - a.y) < a.size + 6 && Math.hypot(s.x - a.x, s.y - a.y) < a.size + 4) { s.life = 0; if (--a.hp <= 0) { a.dead = true; stats.ore++; score += 20; boom(a.x, a.y, '#b0a090', 12); const r = Math.random(); pickups.push({ x: a.x, y: a.y, vx: a.vx + rand(-0.3, 0.3), vy: a.vy + rand(-0.3, 0.3), kind: r < 0.5 ? 'ice' : r < 0.62 ? 'o2' : r < 0.72 ? 'scrap' : 'ore', life: 1500 }); } else boom(s.x, s.y, '#ddd', 3); } }
+    for (const p of pirates) { if (s.life > 0 && Math.hypot(s.x - p.x, s.y - p.y) < 20) { s.life = 0; p.hp--; boom(s.x, s.y, '#ffcc66', 4); if (p.hp <= 0) { p.dead = true; stats.kills++; score += 150; boom(p.x, p.y, '#ff6b6b', 30); pickups.push({ x: p.x, y: p.y, vx: p.vx, vy: p.vy, kind: 'ice', life: 1500 }); pickups.push({ x: p.x + 8, y: p.y, vx: p.vx, vy: p.vy, kind: 'scrap', life: 1500 }); toast('Raider destroyed. Salvage dropped.'); } } }
+  }
+  shots = shots.filter(s => s.life > 0); pirates = pirates.filter(p => !p.dead);
+
+  // --- pirates ---
+  if (pirates.length < 2 && !dlg && Math.abs(Math.hypot(ship.x, ship.y) - 3800) < 500 && Math.random() < 0.0006 && frame > 1200) { spawnPirate(); toast('Hostile contact approaching!'); }
+  for (const p of pirates) {
+    const dx = ship.x - p.x, dy = ship.y - p.y, d = Math.hypot(dx, dy) || 1;
+    p.a = Math.atan2(dy, dx);
+    const rvx = ship.vx - p.vx, rvy = ship.vy - p.vy;
+    if (d > 260) { p.vx += dx / d * 0.05 + rvx * 0.01; p.vy += dy / d * 0.05 + rvy * 0.01; } else { p.vx += rvx * 0.03; p.vy += rvy * 0.03; }
+    const ps = Math.hypot(p.vx - ship.vx, p.vy - ship.vy); if (ps > 6) { p.vx = ship.vx + (p.vx - ship.vx) * 6 / ps; p.vy = ship.vy + (p.vy - ship.vy) * 6 / ps; }
+    p.x += p.vx; p.y += p.vy;
+    if (--p.cool <= 0 && d < 520) { eshots.push({ x: p.x, y: p.y, vx: p.vx + dx / d * 6, vy: p.vy + dy / d * 6, life: 120 }); p.cool = rand(70, 130); }
+    if (d > 2500) p.dead = true;
+  }
+  for (const s of eshots) {
+    s.x += s.vx; s.y += s.vy; s.life--;
+    if (Math.hypot(s.x - ship.x, s.y - ship.y) < 15) {
+      s.life = 0;
+      if (ship.shield > 0) boom(s.x, s.y, '#6cf', 6);
+      else { ship.hull -= 8; shake = 8; boom(s.x, s.y, '#f66', 8); if (ship.hull <= 0) return die('Shot down by space raiders'); }
+    }
+  }
+  eshots = eshots.filter(s => s.life > 0);
+
+  // --- pickups ---
+  for (const k of pickups) {
+    k.x += k.vx; k.y += k.vy; k.life--;
+    const dx = ship.x - k.x, dy = ship.y - k.y, d = Math.hypot(dx, dy);
+    if (d < 90) { k.vx += dx / d * 0.15; k.vy += dy / d * 0.15; }
+    if (d < 20) {
+      k.life = 0;
+      if (k.kind === 'ice') { ship.fuel = clamp(ship.fuel + 7, 0, 100); toast('Ice mined: +7 fuel'); }
+      if (k.kind === 'o2') { ship.o2 = clamp(ship.o2 + 18, 0, 100); toast('Oxygen tank: +18'); }
+      if (k.kind === 'scrap') { ship.hull = clamp(ship.hull + 6, 0, 100); toast('Scrap metal: hull +6'); }
+      if (k.kind === 'ore') { score += 60; toast('Rare ore: +60'); }
+    }
+  }
+  pickups = pickups.filter(k => k.life > 0);
+
+  // --- solar flare ---
+  if (!flare && --nextFlare <= 0) { flare = { t: 360, shielded: false }; toast('SOLAR FLARE incoming! Press E to raise shields!'); }
+  if (flare) {
+    flare.t--;
+    if (flare.t <= 0) {
+      if (!flare.shielded) { ship.hull -= 25; shake = 20; toast('The flare burned your electronics! Hull -25'); if (ship.hull <= 0) return die('Destroyed by a solar flare'); }
+      flare = null; nextFlare = 4500 + rand(0, 4500);
+    }
+  }
+
+  for (const p of parts) { p.x += p.vx; p.y += p.vy; p.life--; }
+  parts = parts.filter(p => p.life > 0);
+  for (const t of toasts) t.life--;
+  toasts = toasts.filter(t => t.life > 0);
+  if (shake > 0) shake--;
+}
+
+// ---------- Drawing ----------
+let camX = 0, camY = 0;
+const sx = x => (x - camX) * z + W / 2, sy = y => (y - camY) * z + H / 2;
+
+function drawBody(b) {
+  const X = sx(b.x), Y = sy(b.y), R = b.r * z;
+  if (X < -R - 400 || X > W + R + 400 || Y < -R - 400 || Y > H + R + 400) return;
+  if (b.id === 'sun') {
+    const g = ctx.createRadialGradient(X, Y, R * 0.2, X, Y, R * 3.2);
+    g.addColorStop(0, '#fff6c8'); g.addColorStop(0.3, 'rgba(255,200,60,0.9)'); g.addColorStop(0.45, 'rgba(255,140,30,0.35)'); g.addColorStop(1, 'rgba(255,100,0,0)');
+    ctx.fillStyle = g; ctx.beginPath(); ctx.arc(X, Y, R * 3.2, 0, TAU); ctx.fill();
+    return;
+  }
+  const sdx = byId.sun.x - b.x, sdy = byId.sun.y - b.y, sd = Math.hypot(sdx, sdy) || 1, lx = sdx / sd, ly = sdy / sd;
+  const ringed = b.id === 'saturn';
+  if (ringed) { ctx.save(); ctx.translate(X, Y); ctx.rotate(-0.35); ctx.strokeStyle = 'rgba(220,200,150,0.65)'; ctx.lineWidth = R * 0.28; ctx.beginPath(); ctx.ellipse(0, 0, R * 1.9, R * 0.55, 0, Math.PI, TAU); ctx.stroke(); ctx.lineWidth = R * 0.1; ctx.strokeStyle = 'rgba(200,180,130,0.5)'; ctx.beginPath(); ctx.ellipse(0, 0, R * 2.3, R * 0.68, 0, Math.PI, TAU); ctx.stroke(); ctx.restore(); }
+  const g = ctx.createRadialGradient(X + lx * R * 0.45, Y + ly * R * 0.45, R * 0.1, X, Y, R * 1.05);
+  g.addColorStop(0, b.c1); g.addColorStop(1, b.c2);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(X, Y, R, 0, TAU); ctx.fill();
+  ctx.save(); ctx.beginPath(); ctx.arc(X, Y, R, 0, TAU); ctx.clip();
+  if (b.id === 'jupiter' || b.id === 'saturn') { ctx.globalAlpha = 0.22; for (let i = -4; i <= 4; i++) { ctx.fillStyle = i % 2 ? '#7a4a22' : '#fff0d0'; ctx.fillRect(X - R, Y + i * R * 0.22, R * 2, R * 0.11); } ctx.globalAlpha = 1; }
+  if (b.id === 'jupiter') { ctx.fillStyle = 'rgba(190,70,40,0.8)'; ctx.beginPath(); ctx.ellipse(X + R * 0.25, Y + R * 0.3, R * 0.2, R * 0.1, 0, 0, TAU); ctx.fill(); }
+  if (b.id === 'earth') { ctx.fillStyle = 'rgba(60,170,90,0.85)'; ctx.beginPath(); ctx.ellipse(X - R * 0.3, Y - R * 0.1, R * 0.35, R * 0.25, 0.5, 0, TAU); ctx.ellipse(X + R * 0.35, Y + R * 0.3, R * 0.25, R * 0.2, 0, 0, TAU); ctx.fill(); ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.beginPath(); ctx.ellipse(X, Y - R * 0.6, R * 0.4, R * 0.1, 0, 0, TAU); ctx.fill(); }
+  if (b.id === 'mars') { ctx.fillStyle = 'rgba(255,255,255,0.7)'; ctx.beginPath(); ctx.ellipse(X, Y - R * 0.85, R * 0.3, R * 0.1, 0, 0, TAU); ctx.fill(); }
+  // night side shading
+  const ng = ctx.createRadialGradient(X + lx * R * 0.6, Y + ly * R * 0.6, R * 0.6, X - lx * R * 0.5, Y - ly * R * 0.5, R * 1.4);
+  ng.addColorStop(0, 'rgba(0,0,0,0)'); ng.addColorStop(1, 'rgba(0,0,10,0.65)');
+  ctx.fillStyle = ng; ctx.fillRect(X - R, Y - R, R * 2, R * 2);
+  ctx.restore();
+  if (ringed) { ctx.save(); ctx.translate(X, Y); ctx.rotate(-0.35); ctx.strokeStyle = 'rgba(230,210,160,0.75)'; ctx.lineWidth = R * 0.28; ctx.beginPath(); ctx.ellipse(0, 0, R * 1.9, R * 0.55, 0, 0, Math.PI); ctx.stroke(); ctx.lineWidth = R * 0.1; ctx.strokeStyle = 'rgba(210,190,140,0.55)'; ctx.beginPath(); ctx.ellipse(0, 0, R * 2.3, R * 0.68, 0, 0, Math.PI); ctx.stroke(); ctx.restore(); }
+  if (b.id === 'earth') { ctx.fillStyle = '#fff'; ctx.fillRect(X + R + 14 * z, Y - 2, 5, 5); }
+  ctx.fillStyle = '#cfe'; ctx.font = Math.round(12 * Math.max(z, 0.8)) + 'px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(b.name, X, Y + R + 16);
+}
+
+function drawShip() {
+  if (ship.inv > 0 && Math.floor(ship.inv / 4) % 2) return;
+  ctx.save(); ctx.translate(sx(ship.x), sy(ship.y)); ctx.rotate(ship.a); ctx.scale(z, z);
+  if (ship.thrusting) { ctx.fillStyle = '#ffae42'; ctx.beginPath(); ctx.moveTo(-10, -5); ctx.lineTo(-10 - rand(10, 22), 0); ctx.lineTo(-10, 5); ctx.fill(); }
+  ctx.fillStyle = '#dfe9f5'; ctx.beginPath(); ctx.moveTo(18, 0); ctx.lineTo(-12, -11); ctx.lineTo(-7, 0); ctx.lineTo(-12, 11); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = '#4dd0ff'; ctx.beginPath(); ctx.arc(4, 0, 4, 0, TAU); ctx.fill();
+  ctx.fillStyle = '#e4572e'; ctx.fillRect(-12, -12, 5, 4); ctx.fillRect(-12, 8, 5, 4);
+  if (ship.shield > 0) { ctx.strokeStyle = 'rgba(100,200,255,' + (0.4 + 0.3 * Math.sin(frame / 3)) + ')'; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, 26, 0, TAU); ctx.stroke(); }
+  ctx.restore();
+}
+
+function bar(x, y, w, v, col, label) {
+  ctx.fillStyle = 'rgba(255,255,255,0.15)'; ctx.fillRect(x, y, w, 10);
+  ctx.fillStyle = v < 25 ? '#ff4d4d' : col; ctx.fillRect(x, y, w * clamp(v / 100, 0, 1), 10);
+  ctx.fillStyle = '#fff'; ctx.font = '11px sans-serif'; ctx.textAlign = 'left'; ctx.fillText(label + ' ' + Math.round(v), x + w + 6, y + 9);
+}
+
+function drawPanel(title, text, opts, w0) {
+  const fs = W < 500 ? 12 : 15;
+  ctx.font = fs + 'px sans-serif';
+  const w = Math.min(W - 24, w0 || 580), lines = wrap(text, w - 36), lh = fs + 5;
+  const bh = W < 500 ? 40 : 46, h = 56 + lines.length * lh + 14 + opts.length * (bh + 8) + 10;
+  const x = (W - w) / 2, y = Math.max(8, (H - h) / 2);
+  ctx.fillStyle = 'rgba(4,8,24,0.94)'; ctx.strokeStyle = '#4dd0ff'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, 12); ctx.fill(); ctx.stroke();
+  ctx.fillStyle = '#4dd0ff'; ctx.font = 'bold 17px sans-serif'; ctx.textAlign = 'left'; ctx.fillText(title, x + 20, y + 32);
+  ctx.fillStyle = '#e6edf7'; ctx.font = fs + 'px sans-serif';
+  lines.forEach((l, i) => ctx.fillText(l, x + 20, y + 62 + i * lh));
+  const rects = []; let oy = y + 56 + lines.length * lh + 14;
+  opts.forEach((o, i) => {
+    ctx.fillStyle = '#12335a'; ctx.strokeStyle = '#4dd0ff'; ctx.lineWidth = 1.5; ctx.beginPath(); ctx.roundRect(x + 20, oy, w - 40, bh, 8); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#fff'; ctx.font = (W < 500 ? 12 : 14) + 'px sans-serif'; ctx.textAlign = 'left';
+    const tl = wrap((opts.length > 1 ? (i + 1) + '. ' : '') + o.t, w - 70);
+    tl.slice(0, 2).forEach((l, k) => ctx.fillText(l, x + 32, oy + (tl.length > 1 ? 19 : 28) + k * 16));
+    rects.push({ x: x + 20, y: oy, w: w - 40, h: bh }); oy += bh + 8;
+  });
+  return rects;
+}
+
+function draw() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.save();
+  if (shake > 0) ctx.translate(rand(-4, 4), rand(-4, 4));
+  ctx.fillStyle = '#03040a'; ctx.fillRect(-10, -10, W + 20, H + 20);
+  const cx = state === 'play' || state === 'over' ? ship.x : byId.earth ? byId.earth.x : 0;
+  const cy = state === 'play' || state === 'over' ? ship.y : byId.earth ? byId.earth.y : 0;
+  camX = cx; camY = cy;
+
+  // parallax stars
+  for (const s of stars) {
+    const f = [0.02, 0.05, 0.1][s.l];
+    const px = ((s.x * W - camX * f) % W + W) % W, py = ((s.y * H - camY * f) % H + H) % H;
+    ctx.fillStyle = 'rgba(255,255,255,' + (0.4 + s.l * 0.25) + ')'; ctx.fillRect(px, py, s.s, s.s);
+  }
+
+  if (state === 'menu') { drawMenu(); ctx.restore(); return; }
+
+  // orbit lines
+  ctx.strokeStyle = 'rgba(120,160,255,0.08)'; ctx.lineWidth = 1;
+  for (const id of ['earth', 'mars', 'jupiter', 'saturn']) { const b = byId[id]; ctx.beginPath(); ctx.arc(sx(0), sy(0), b.R * z, 0, TAU); ctx.stroke(); }
+
+  // asteroid belt
+  ctx.fillStyle = '#8a7f72';
+  for (const a of belt) {
+    if (a.dead) continue;
+    const X = sx(a.x), Y = sy(a.y), r = a.size * z;
+    if (X < -30 || X > W + 30 || Y < -30 || Y > H + 30) continue;
+    ctx.save(); ctx.translate(X, Y); ctx.rotate(a.rot); ctx.beginPath();
+    for (let i = 0; i < 8; i++) { const an = i / 8 * TAU; ctx.lineTo(Math.cos(an) * r * a.pts[i], Math.sin(an) * r * a.pts[i]); }
+    ctx.closePath(); ctx.fill(); ctx.restore();
+  }
+
+  bodies.forEach(drawBody);
+
+  // beacon
+  if (!beacon.done) {
+    const X = sx(beacon.x), Y = sy(beacon.y);
+    ctx.fillStyle = '#556'; ctx.fillRect(X - 12, Y - 5, 24, 10);
+    ctx.fillStyle = Math.floor(frame / 20) % 2 ? '#ff4d4d' : '#ffd166'; ctx.beginPath(); ctx.arc(X, Y - 9, 4, 0, TAU); ctx.fill();
+    ctx.fillStyle = '#ffd166'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('DISTRESS', X, Y + 22);
+  }
+
+  // pickups
+  for (const k of pickups) {
+    const X = sx(k.x), Y = sy(k.y);
+    ctx.fillStyle = { ice: '#8be9ff', o2: '#7dffb3', scrap: '#b0b8c8', ore: '#ffd166' }[k.kind];
+    ctx.beginPath(); ctx.arc(X, Y, 5, 0, TAU); ctx.fill();
+  }
+  // pirates
+  for (const p of pirates) {
+    ctx.save(); ctx.translate(sx(p.x), sy(p.y)); ctx.rotate(p.a); ctx.scale(z, z);
+    ctx.fillStyle = '#d33a3a'; ctx.beginPath(); ctx.moveTo(16, 0); ctx.lineTo(-12, -12); ctx.lineTo(-6, 0); ctx.lineTo(-12, 12); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = '#111'; ctx.fillRect(2, -3, 6, 6); ctx.restore();
+  }
+  ctx.fillStyle = '#7dffb3'; for (const s of shots) ctx.fillRect(sx(s.x) - 2, sy(s.y) - 2, 4, 4);
+  ctx.fillStyle = '#ff4d6d'; for (const s of eshots) { ctx.beginPath(); ctx.arc(sx(s.x), sy(s.y), 4, 0, TAU); ctx.fill(); }
+  for (const p of parts) { ctx.globalAlpha = clamp(p.life / 40, 0, 1); ctx.fillStyle = p.c; ctx.fillRect(sx(p.x), sy(p.y), 3, 3); }
+  ctx.globalAlpha = 1;
+  if (state === 'play') drawShip();
+
+  // landing ring / prompt
+  const lb = state === 'play' ? landable() : null;
+  if (lb) { ctx.strokeStyle = 'rgba(125,255,179,0.5)'; ctx.setLineDash([6, 6]); ctx.beginPath(); ctx.arc(sx(lb.x), sy(lb.y), (lb.r + 95) * z, 0, TAU); ctx.stroke(); ctx.setLineDash([]); }
+
+  // flare overlay
+  if (flare) { ctx.fillStyle = 'rgba(255,170,40,' + (0.08 + 0.06 * Math.sin(frame / 4)) + ')'; ctx.fillRect(0, 0, W, H); }
+  ctx.restore();
+
+  if (state === 'play') drawHUD(lb);
+  if (state === 'over') drawEnd('MISSION FAILED', deathReason, '#ff6b6b');
+  if (state === 'win' && ending) drawEnd(ending.title, ending.text, '#7dffb3');
+  if (dlg && state === 'play') dlg.rects = drawPanel(dlg.title, dlg.text, dlg.opts);
+}
+
+function drawHUD(lb) {
+  bar(14, 14, 110, ship.hull, '#4dd0ff', 'HULL'); bar(14, 32, 110, ship.fuel, '#ffae42', 'FUEL'); bar(14, 50, 110, ship.o2, '#7dffb3', 'O2');
+  const o = objective() || byId.titan, target = o;
+  const rvx = ship.vx - target.vx, rvy = ship.vy - target.vy, rs = Math.hypot(rvx, rvy);
+  const dist = Math.hypot(target.x - ship.x, target.y - ship.y);
+  ctx.fillStyle = '#fff'; ctx.font = '12px sans-serif'; ctx.textAlign = 'left';
+  ctx.fillText('Speed vs ' + target.name + ': ' + (rs * SPEED_KMS).toFixed(1) + ' km/s', 14, 84);
+  ctx.fillText('Distance: ' + (dist * UNIT_MKM).toFixed(1) + ' million km', 14, 100);
+  ctx.fillStyle = '#ffd166'; ctx.fillText('Objective: ' + (visited.titan ? 'Complete' : 'Reach ' + o.name) + '', 14, 118);
+  ctx.fillStyle = '#9ab'; ctx.fillText('Fragments ' + fragCount() + '/4    Score ' + score, 14, 134);
+
+  // pointer to objective
+  const X = sx(target.x), Y = sy(target.y);
+  if (X < 0 || X > W || Y < 0 || Y > H) {
+    const a = Math.atan2(target.y - ship.y, target.x - ship.x), rr = Math.min(W, H) * 0.4;
+    const px = W / 2 + Math.cos(a) * rr, py = H / 2 + Math.sin(a) * rr;
+    ctx.save(); ctx.translate(px, py); ctx.rotate(a); ctx.fillStyle = '#ffd166'; ctx.beginPath(); ctx.moveTo(14, 0); ctx.lineTo(-8, -9); ctx.lineTo(-8, 9); ctx.fill(); ctx.restore();
+    ctx.fillStyle = '#ffd166'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(target.name, px - Math.cos(a) * 24, py - Math.sin(a) * 24 + 4);
+  }
+
+  // minimap
+  const mx = W - 78, my = 88, mr = 66, sc = mr / 8300;
+  ctx.fillStyle = 'rgba(5,10,30,0.7)'; ctx.beginPath(); ctx.arc(mx, my, mr, 0, TAU); ctx.fill(); ctx.strokeStyle = '#345'; ctx.stroke();
+  ctx.strokeStyle = 'rgba(140,140,150,0.35)'; ctx.beginPath(); ctx.arc(mx, my, 3800 * sc, 0, TAU); ctx.stroke();
+  for (const b of bodies) { ctx.fillStyle = b.id === 'sun' ? '#ffd24a' : (b === target ? '#ffd166' : b.c1); ctx.beginPath(); ctx.arc(mx + b.x * sc, my + b.y * sc, b === target ? 3.5 : (b.id === 'sun' ? 3 : 2), 0, TAU); ctx.fill(); }
+  if (!beacon.done) { ctx.fillStyle = Math.floor(frame / 15) % 2 ? '#f55' : '#fa0'; ctx.fillRect(mx + beacon.x * sc - 1.5, my + beacon.y * sc - 1.5, 3, 3); }
+  ctx.fillStyle = '#fff'; ctx.fillRect(mx + ship.x * sc - 1.5, my + ship.y * sc - 1.5, 3, 3);
+
+  // flare banner
+  if (flare && !flare.shielded) { ctx.fillStyle = '#ffb347'; ctx.font = 'bold 18px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('SOLAR FLARE! Press E (SHIELD) in ' + Math.ceil(flare.t / 60) + 's', W / 2, 40); }
+
+  // landing prompt
+  ctx.textAlign = 'center'; ctx.font = 'bold 16px sans-serif';
+  if (lb) { ctx.fillStyle = '#7dffb3'; ctx.fillText('Press E: ' + (INFO[lb.id] && INFO[lb.id].scan ? 'Scan ' : 'Land on ') + lb.name, W / 2, H * 0.6); }
+  else {
+    for (const b of bodies) { if (b.id === 'sun') continue; const d = Math.hypot(ship.x - b.x, ship.y - b.y) - b.r; if (d < 95 && Math.hypot(ship.vx - b.vx, ship.vy - b.vy) >= LAND_SPEED) { ctx.fillStyle = '#ffae42'; ctx.fillText('Too fast to land: slow below ' + (LAND_SPEED * SPEED_KMS).toFixed(0) + ' km/s (hold BRAKE)', W / 2, H * 0.6); break; } }
+  }
+
+  // toasts
+  ctx.font = '14px sans-serif'; ctx.textAlign = 'center';
+  toasts.slice(-3).forEach((t, i, arr) => { ctx.globalAlpha = clamp(t.life / 60, 0, 1); ctx.fillStyle = '#fff'; ctx.fillText(t.t, W / 2, H - (showButtons ? 170 : 56) - (arr.length - 1 - i) * 20); });
+  ctx.globalAlpha = 1;
+
+  // joystick
+  if (!dlg && (joy || showButtons)) {
+    const bx = joy ? joy.bx : W * 0.2, by = joy ? joy.by : H - 110;
+    ctx.strokeStyle = joy ? 'rgba(77,208,255,0.7)' : 'rgba(255,255,255,0.25)'; ctx.fillStyle = 'rgba(255,255,255,0.07)'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.arc(bx, by, JOY_R, 0, TAU); ctx.fill(); ctx.stroke();
+    let kx = bx, ky = by;
+    if (joy) { const jx = joy.x - joy.bx, jy = joy.y - joy.by, l = Math.hypot(jx, jy) || 1, c = Math.min(l, JOY_R); kx = bx + jx / l * c; ky = by + jy / l * c; }
+    ctx.fillStyle = joy ? 'rgba(77,208,255,0.7)' : 'rgba(255,255,255,0.2)'; ctx.beginPath(); ctx.arc(kx, ky, 26, 0, TAU); ctx.fill();
+    if (!joy) { ctx.fillStyle = 'rgba(255,255,255,0.5)'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('STEER: drag here', bx, by + JOY_R + 16); }
+  }
+  // controls
+  if (showButtons && !dlg) {
+    for (const b of buttons) {
+      const on = ptrHeld[b.id];
+      ctx.fillStyle = on ? 'rgba(77,208,255,0.55)' : 'rgba(255,255,255,0.12)'; ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(b.x, b.y, b.r, 0, TAU); ctx.fill(); ctx.stroke();
+      ctx.fillStyle = '#fff'; ctx.font = 'bold ' + (b.t.length > 2 ? 11 : 18) + 'px sans-serif'; ctx.textAlign = 'center'; ctx.fillText(b.t, b.x, b.y + 5);
+    }
+  } else if (!showButtons) {
+    ctx.fillStyle = 'rgba(255,255,255,0.4)'; ctx.font = '12px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText('←→ turn   ↑ burn   Space laser   S match speed   E land/scan/shield', W / 2, H - 14);
+  }
+}
+
+function drawMenu() {
+  ctx.textAlign = 'center';
+  ctx.fillStyle = '#4dd0ff'; ctx.font = 'bold ' + Math.min(48, W / 10) + 'px sans-serif'; ctx.fillText('STAR VOYAGER', W / 2, H / 2 - 80);
+  ctx.fillStyle = '#ffd166'; ctx.font = 'bold ' + Math.min(28, W / 16) + 'px sans-serif'; ctx.fillText('THE TITAN SIGNAL', W / 2, H / 2 - 42);
+  ctx.fillStyle = '#cdd6e6'; ctx.font = '16px sans-serif';
+  ctx.fillText('Explore the real solar system with real orbital physics.', W / 2, H / 2 + 5);
+  ctx.fillText('Manage fuel, oxygen and hull. Make hard choices.', W / 2, H / 2 + 28);
+  ctx.fillStyle = '#7dffb3'; ctx.font = 'bold 18px sans-serif'; ctx.fillText('Tap or press Enter to launch', W / 2, H / 2 + 75);
+  ctx.fillStyle = '#889'; ctx.font = '13px sans-serif'; ctx.fillText('Best score: ' + best, W / 2, H / 2 + 105);
+}
+function drawEnd(title, text, col) {
+  ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = 'center'; ctx.fillStyle = col; ctx.font = 'bold ' + Math.min(38, W / 11) + 'px sans-serif'; ctx.fillText(title, W / 2, H / 2 - 90);
+  ctx.fillStyle = '#e6edf7'; ctx.font = '16px sans-serif';
+  const lines = wrap(text, Math.min(W - 40, 520)); lines.forEach((l, i) => ctx.fillText(l, W / 2, H / 2 - 50 + i * 22));
+  const y = H / 2 - 50 + lines.length * 22 + 14;
+  ctx.fillStyle = '#ffd166'; ctx.fillText('Score ' + score + '   Fragments ' + fragCount() + '/4   Raiders destroyed ' + stats.kills + '   Best ' + best, W / 2, y);
+  ctx.fillStyle = '#7dffb3'; ctx.font = 'bold 17px sans-serif'; ctx.fillText('Tap or press Enter to play again', W / 2, y + 40);
+}
+
+function loop() { update(); draw(); requestAnimationFrame(loop); }
+makeWorld();
+loop();
+</script>
+</body>
+</html>
